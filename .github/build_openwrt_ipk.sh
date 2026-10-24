@@ -62,6 +62,14 @@ INSTALLED_SIZE=$(
     | awk '{ s += $1 } END { print s+0 }'
 )
 
+# Runtime dependencies. Deliberately NOT sing-box: that is expected to be
+# installed separately.
+#   luci-base       - the LuCI web framework the view is built on
+#   rpcd-mod-ucode  - loads our /usr/share/rpcd/ucode ubus backend
+#   ucode-mod-fs    - provides the `fs`/`popen` module the backend uses
+#   uclient-fetch   - provides the `wget` the subscribe script calls
+DEPENDS="luci-base, rpcd-mod-ucode, ucode-mod-fs, uclient-fetch"
+
 cat > "$CONTROL_DIR/control" <<EOF
 Package: $PACKAGE_NAME
 Version: $IPK_VERSION
@@ -69,6 +77,7 @@ Architecture: $ARCHITECTURE
 Maintainer: iikira <iikira@users.noreply.github.com>
 Section: luci
 Priority: optional
+Depends: $DEPENDS
 Installed-Size: $INSTALLED_SIZE
 Description: Simple sing-box daemon and subscription auto-update.
  Background daemon and subscription auto-update for sing-box. Manages a
@@ -77,7 +86,7 @@ Description: Simple sing-box daemon and subscription auto-update.
  swapping it in. Does not depend on sing-box itself.
 EOF
 
-# No dependency on sing-box: it is expected to be installed separately.
+# Note: no dependency on sing-box itself, by design.
 
 # Mark config files as conffiles so opkg preserves user edits across upgrade.
 cat > "$CONTROL_DIR/conffiles" <<'EOF'

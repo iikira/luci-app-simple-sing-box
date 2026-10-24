@@ -79,10 +79,16 @@ mkdir -p "$PACKAGES_DIR"
   | grep -v '^/lib/apk/packages/' \
   | sort > "$PACKAGES_DIR/$PACKAGE_NAME.list"
 
-# Build APK. No `depends:` line: this LuCI app deliberately does not declare a
-# dependency on sing-box (the user is expected to install it separately).
-# Build the optional sign-key argument as a plain string (not a bash array)
-# so this script also runs under BusyBox ash.
+# Runtime dependencies (space-separated for apk). Deliberately NOT sing-box:
+# that is expected to be installed separately.
+#   luci-base       - the LuCI web framework the view is built on
+#   rpcd-mod-ucode  - loads our /usr/share/rpcd/ucode ubus backend
+#   ucode-mod-fs    - provides the `fs`/`popen` module the backend uses
+#   uclient-fetch   - provides the `wget` the subscribe script calls
+DEPENDS="luci-base rpcd-mod-ucode ucode-mod-fs uclient-fetch"
+
+# Build APK. Build the optional sign-key argument as a plain string (not a
+# bash array) so this script also runs under BusyBox ash.
 SIGN_ARGS=""
 if [ -n "$SIGN_KEY" ]; then
   SIGN_ARGS="--sign-key $SIGN_KEY"
@@ -96,6 +102,7 @@ apk --root "$APK_ROOT_DIR" mkpkg \
   --info "arch:${ARCHITECTURE}" \
   --info "origin:$PACKAGE_NAME" \
   --info "maintainer:iikira <iikira@users.noreply.github.com>" \
+  --info "depends:${DEPENDS}" \
   --files "$ROOT_DIR" \
   --output "$OUTPUT_PATH"
 

@@ -38,6 +38,7 @@ jobs:
         run: |
           set -e
           STAGE="${RUNNER_TEMP}/stage"
+          rm -rf "$STAGE"
           mkdir -p "$STAGE"
           # Copy the rootfs overlay verbatim (etc/, usr/...).
           cp -a root/. "$STAGE/"
@@ -51,55 +52,66 @@ jobs:
           [ -f "$STAGE/etc/uci-defaults/simple-sing-box" ] && chmod 0755 "$STAGE/etc/uci-defaults/simple-sing-box"
           # Print the tree for log visibility.
           echo "=== staged tree ==="
-          ( cd "$STAGE" && find . -maxdepth 4 -printf '%m %p\n' | sort )
+          ( cd "$STAGE" && find . -maxdepth 4 | sort )
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"
-
-      - name: Install apk-tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y apk-tools binutils
 
       - name: Prepare signing key
         # When the APK_SIGN_KEY secret is set (private key only), write it to a
-        # file and pass it to the apk build for signing. The build script
-        # derives the matching public key at runtime for verification.
-        # If the secret is empty, the apk is built unsigned.
+        # file so the build can sign the apk. The build script derives the
+        # matching public key at runtime to verify the signature. If the secret
+        # is empty, the apk is built unsigned.
         run: |
+          set -e
+          mkdir -p "${RUNNER_TEMP}/keys"
           if [ -n "${{ secrets.APK_SIGN_KEY }}" ]; then
-            SIGN_KEY="${{ runner.temp }}/sign.rsa"
-            printf '%s\n' '${{ secrets.APK_SIGN_KEY }}' > "$SIGN_KEY"
-            chmod 0600 "$SIGN_KEY"
-            echo "SIGN_KEY=$SIGN_KEY" >> "$GITHUB_ENV"
+            printf '%s\n' '${{ secrets.APK_SIGN_KEY }}' > "${RUNNER_TEMP}/keys/sign.rsa"
+            chmod 0600 "${RUNNER_TEMP}/keys/sign.rsa"
+            echo "Signing key prepared."
           else
-            echo "SIGN_KEY=" >> "$GITHUB_ENV"
+            echo "APK_SIGN_KEY not set; the apk will be built unsigned."
           fi
 
-      - name: Build .apk
+      - name: Build .apk and .ipk (alpine:edge container)
+        # Ubuntu has no `apk-tools` package, so the packages are built inside an
+        # alpine:edge container, where apk (with `mkpkg`) and binutils' `ar` are
+        # available natively. The build scripts take only a staging dir, an
+        # output path and an optional signing key, so only .github/ needs
+        # mounting.
         run: |
-          .github/build_openwrt_apk.sh \
-            "$ARCH_APK" \
-            "${{ steps.ver.outputs.version }}" \
-            "$STAGE" \
-            "${{ runner.temp }}/${PACKAGE_NAME}-${{ steps.ver.outputs.version }}.apk" \
-            "$SIGN_KEY" \
-            "$PACKAGE_NAME"
-
-      - name: Build .ipk
-        run: |
-          .github/build_openwrt_ipk.sh \
-            "$ARCH_IPK" \
-            "${{ steps.ver.outputs.version }}" \
-            "$STAGE" \
-            "${{ runner.temp }}/${PACKAGE_NAME}-${{ steps.ver.outputs.version }}.ipk" \
-            "$PACKAGE_NAME"
+          set -e
+          mkdir -p "${RUNNER_TEMP}/out"
+          chmod -R a+rX "${STAGE}"
+          docker run --rm \
+            -e VERSION="${{ steps.ver.outputs.version }}" \
+            -e PACKAGE_NAME="${PACKAGE_NAME}" \
+            -e ARCH_APK="${ARCH_APK}" \
+            -e ARCH_IPK="${ARCH_IPK}" \
+            -v "${STAGE}:/stage:ro" \
+            -v "${RUNNER_TEMP}/out:/out" \
+            -v "${RUNNER_TEMP}/keys:/keys" \
+            -v "${GITHUB_WORKSPACE}/.github:/scripts:ro" \
+            alpine:edge sh -c '
+              set -e
+              apk add --no-cache bash openssl binutils tar >/dev/null
+              SIGN=""
+              [ -f /keys/sign.rsa ] && SIGN=/keys/sign.rsa
+              bash /scripts/build_openwrt_apk.sh \
+                "$ARCH_APK" "$VERSION" /stage \
+                "/out/${PACKAGE_NAME}-${VERSION}.apk" "$SIGN" "$PACKAGE_NAME"
+              bash /scripts/build_openwrt_ipk.sh \
+                "$ARCH_IPK" "$VERSION" /stage \
+                "/out/${PACKAGE_NAME}-${VERSION}.ipk" "$PACKAGE_NAME"
+            '
+          echo "=== built artifacts ==="
+          ls -la "${RUNNER_TEMP}/out"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${PACKAGE_NAME}-${{ steps.ver.outputs.version }}
+          name: ${{ env.PACKAGE_NAME }}-${{ steps.ver.outputs.version }}
           path: |
-            ${{ runner.temp }}/${PACKAGE_NAME}-*.apk
-            ${{ runner.temp }}/${PACKAGE_NAME}-*.ipk
+            ${{ runner.temp }}/out/*.apk
+            ${{ runner.temp }}/out/*.ipk
           if-no-files-found: error
 
       - name: Release on tag
@@ -110,5 +122,5 @@ jobs:
           # reviewed and published.
           draft: true
           files: |
-            ${{ runner.temp }}/${PACKAGE_NAME}-*.apk
-            ${{ runner.temp }}/${PACKAGE_NAME}-*.ipk
+            ${{ runner.temp }}/out/*.apk
+            ${{ runner.temp }}/out/*.ipk

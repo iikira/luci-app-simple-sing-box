@@ -12,10 +12,15 @@ PKG_RELEASE:=1
 PKG_LICENSE:=MIT License
 PKG_MAINTAINER:=iikira <iikira@users.noreply.github.com>
 
-# No dependency on sing-box: it is expected to be installed separately, so
-# this LuCI app stays decoupled from any specific sing-box package.
+# Deliberately NOT dependent on sing-box: it is expected to be installed
+# separately, so this LuCI app stays decoupled from any specific sing-box
+# package. It does declare the packages it actually needs at runtime:
+#   luci-base       - the LuCI web framework the view is built on
+#   rpcd-mod-ucode  - loads our /usr/share/rpcd/ucode ubus backend
+#   ucode-mod-fs    - provides the `fs`/`popen` module the backend uses
+#   uclient-fetch   - provides the `wget` the subscribe script calls
 LUCI_TITLE:=Simple sing-box daemon and subscription auto-update
-LUCI_DEPENDS:=
+LUCI_DEPENDS:=+luci-base +rpcd-mod-ucode +ucode-mod-fs +uclient-fetch
 LUCI_PKGARCH:=all
 
 include $(TOPDIR)/package/luci/luci.mk
