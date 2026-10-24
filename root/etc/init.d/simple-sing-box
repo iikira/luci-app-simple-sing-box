@@ -17,9 +17,31 @@ SUBSCRIBE_PROG="/usr/libexec/simple-sing-box-subscribe"
 # user-configurable via UCI.
 CONFIG_FILE="/etc/simple-sing-box/config.json"
 WORKING_DIRECTORY="/usr/share/simple-sing-box"
+# Records the settings the running instances were built from, so a reload can
+# skip restarting when nothing the service depends on has changed. Lives in
+# tmpfs: it is rewritten on every start.
+SETTINGS_FILE="/var/run/simple-sing-box.settings"
+
+# The options the running instances actually depend on. Changing only
+# subscribe_url or verify does NOT require a restart: the updater reads those on
+# its next run and the running daemon is unaffected, so restarting would drop
+# every connection for no reason.
+settings_fingerprint() {
+	config_load "simple-sing-box"
+	local enabled log_stderr auto interval
+	config_get_bool enabled "main" "enabled" "0"
+	config_get_bool log_stderr "main" "log_stderr" "1"
+	config_get_bool auto "main" "subscribe_auto_upgrade" "0"
+	config_get interval "main" "subscribe_upgrade_interval_second" "0"
+	printf '%s|%s|%s|%s' "$enabled" "$log_stderr" "$auto" "$interval"
+}
 
 start_service() {
 	config_load "simple-sing-box"
+
+	# Remember what we are starting from, so reload can tell whether anything
+	# the instances depend on actually changed.
+	settings_fingerprint > "$SETTINGS_FILE"
 
 	local enabled
 	local log_stderr
@@ -61,11 +83,19 @@ service_triggers() {
 	procd_add_reload_trigger "simple-sing-box"
 }
 
-# A UCI commit triggers a reload. Do a full stop+start so that disabling
-# `enabled` (or changing the auto-upgrade interval) actually stops the
-# previously supervised instances instead of leaving them running. procd's
-# `stop` tears down the supervised processes cleanly — no killall needed.
+# A UCI commit (or an explicit `reload`) lands here. Restart only when a setting
+# the instances actually depend on changed; otherwise leave the running daemon
+# alone, so an unrelated edit such as the subscription URL does not drop
+# connections. When a restart IS needed, do a full stop+start so that disabling
+# `enabled` (or changing the auto-upgrade interval) actually tears down the
+# previously supervised instances. procd's `stop` does that cleanly — no killall.
 reload_service() {
+	local current
+	current="$(settings_fingerprint)"
+	if [ -f "$SETTINGS_FILE" ] && 	   [ "$(cat "$SETTINGS_FILE" 2>/dev/null)" = "$current" ]; then
+		logger -t simple-sing-box -- "settings unchanged, not restarting"
+		return 0
+	fi
 	stop
 	start
 }

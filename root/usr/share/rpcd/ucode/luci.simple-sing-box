@@ -5,9 +5,10 @@
  * Exposes ubus object: luci.simple-sing-box
  * Methods:
  *   - version         returns the installed sing-box version string
- *   - subscribe_once  runs a one-shot subscription pull + check + reload
+ *   - subscribe_once  starts a background subscription pull (returns at once)
  *   - status          reports whether the sing-box daemon (and the optional
- *                     subscription loop) is running, including pid
+ *                     subscription loop) is running, including pid, plus the
+ *                     result of the last subscription update
  *   - reload          restart the supervised instances from the current config
  *
  * Test:
@@ -24,6 +25,9 @@ import { popen } from "fs";
 
 let PROG = "sing-box";
 let SUBSCRIBE_PROG = "/usr/libexec/simple-sing-box-subscribe";
+// The updater records the outcome of its last run here ("<epoch> <ok|fail>
+// <message>"). /var/run is tmpfs, so it is empty after a reboot.
+let STATUS_FILE = "/var/run/simple-sing-box-subscribe.status";
 
 function trim(s) {
 	// Trim leading/trailing whitespace. Use an explicit character class
@@ -62,16 +66,37 @@ function version() {
 	return { version: first };
 }
 
-/* subscribe_once(): { success: bool, message: str } */
+/* read_status(): parse STATUS_FILE into { time, ok, state, message } or null.
+ * Format written by the updater: "<epoch> <ok|fail> <message>". */
+function read_status() {
+	let raw = command("cat " + shellquote(STATUS_FILE) + " 2>/dev/null");
+	if (raw == "") return null;
+	// match() returns [ full, group1, group2, ... ].
+	let m = match(raw, /^([0-9]+) +([A-Za-z]+) +(.*)$/);
+	if (m == null) return null;
+	return {
+		time: +m[1],
+		state: m[2],
+		ok: (m[2] == "ok"),
+		message: m[3],
+	};
+}
+
+/* subscribe_once(): start a one-shot subscription update **in the background**
+ * and return immediately.
+ *
+ * The download may take up to 60s, but a synchronous ubus call through the web
+ * UI is cut off at ~30s by uhttpd's network_timeout. So the updater is launched
+ * detached here, and the page polls `status` for the recorded result. */
 function subscribe_once() {
 	if (!has_cmd(PROG)) {
-		return { success: false, message: "sing-box not installed" };
+		return { started: false, message: "sing-box not installed" };
 	}
-	let rc = command(shellquote(SUBSCRIBE_PROG) + " --once >/dev/null 2>&1; echo $?");
-	if (rc == "0") {
-		return { success: true, message: "subscription updated" };
-	}
-	return { success: false, message: "subscription update failed, see logread" };
+	// All stdio is redirected so the pipe closes at once and the child is not
+	// tied to this request. nohup guards against SIGHUP if rpcd goes away.
+	command("nohup " + shellquote(SUBSCRIBE_PROG) +
+		" --once >/dev/null 2>&1 </dev/null & echo started");
+	return { started: true };
 }
 
 /* Query procd for the simple-sing-box service instances. Returns the parsed
@@ -88,13 +113,15 @@ function service_instances() {
 }
 
 /* status(): reports the run state of the sing-box daemon and (if present) the
- * subscription loop, including pid and whether procd is supervising them. */
+ * subscription loop, plus the result of the most recent subscription update. */
 function status() {
 	let result = {
 		running: false,
 		pid: null,
 		// The optional subscription auto-updater instance.
 		subscribe_loop: { running: false, pid: null },
+		// Result of the last subscription update (null if it never ran).
+		last_update: read_status(),
 	};
 	let svc = service_instances();
 	if (svc && svc["simple-sing-box"] && svc["simple-sing-box"].instances) {

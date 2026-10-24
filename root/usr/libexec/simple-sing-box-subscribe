@@ -12,6 +12,13 @@
 # is written to a temp file and only `mv`'d over the real config after
 # `sing-box check` succeeds, then procd is told to reload.
 #
+# The outcome of the last run is recorded in $STATUS_FILE so the LuCI RPC
+# backend can report it to the page. The download can take up to
+# $DOWNLOAD_TIMEOUT seconds, which is longer than a synchronous ubus call may
+# block for (uhttpd's network_timeout closes the connection at ~30s), so the
+# page starts the update in the background and polls this result instead of
+# waiting for it.
+#
 # Note: do NOT use `set -u` here. /lib/functions.sh (pulled in below) and the
 # procd helper libraries reference unset variables like IPKG_INSTROOT that are
 # only defined inside the package install environment, so `-u` would abort.
@@ -24,9 +31,23 @@ TAG="simple-sing-box-subscribe"
 # The config file path is fixed by this package and is not user-configurable
 # via UCI; sing-box writes/reads it here.
 CONFFILE="/etc/simple-sing-box/config.json"
+# Where the result of the last run is recorded. /var/run is tmpfs, so this
+# resets on reboot (which is fine: it only describes the most recent run).
+STATUS_FILE="/var/run/simple-sing-box-subscribe.status"
+# Network timeout (seconds) for the subscription download. This bounds a stalled
+# connection so wget cannot hang forever. -T is a connect/read (idle) timeout,
+# not a total limit. uclient-fetch (OpenWrt's wget) supports -T; GNU wget too.
+DOWNLOAD_TIMEOUT="60"
 
 log() {
 	logger -t "$TAG" -- "$*"
+}
+
+# Record the outcome of a run as "<epoch> <ok|fail> <message>" so the LuCI
+# backend can report it to the page. Never fails the script.
+write_status() {
+	mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
+	printf '%s %s %s\n' "$(date +%s)" "$1" "$2" > "$STATUS_FILE" 2>/dev/null || true
 }
 
 read_config() {
@@ -44,15 +65,19 @@ subscribe_once() {
 
 	if [ -z "$subscribe_url" ]; then
 		log "subscribe_url is empty, nothing to do"
+		write_status "ok" "no subscription url configured"
 		return 0
 	fi
 
 	if ! command -v "$PROG" >/dev/null 2>&1; then
 		log "sing-box not found, cannot validate subscription"
+		write_status "fail" "sing-box not found"
 		return 1
 	fi
 
-	local wget_opts="-q -O"
+	# Note: `-O <file>` must be immediately followed by the output path, so the
+	# timeout option goes BEFORE -O (otherwise -O would swallow "-T").
+	local wget_opts="-q -T $DOWNLOAD_TIMEOUT -O"
 	# When verify is off, disable TLS certificate validation for the download.
 	[ "$verify" -eq 1 ] || wget_opts="--no-check-certificate $wget_opts"
 
@@ -67,16 +92,19 @@ subscribe_once() {
 	log "downloading subscription from configured url"
 	if ! wget $wget_opts "$tmp" "$subscribe_url"; then
 		log "subscription download failed"
+		write_status "fail" "subscription download failed"
 		return 1
 	fi
 
 	if [ ! -s "$tmp" ]; then
 		log "subscription download is empty"
+		write_status "fail" "subscription download is empty"
 		return 1
 	fi
 
 	if ! "$PROG" check -c "$tmp" >/dev/null 2>&1; then
 		log "sing-box check failed, keeping current config"
+		write_status "fail" "sing-box check failed, current config kept"
 		return 1
 	fi
 
@@ -85,6 +113,7 @@ subscribe_once() {
 	mkdir -p "$(dirname "$CONFFILE")"
 	if ! mv -f "$tmp" "$CONFFILE"; then
 		log "failed to write new config"
+		write_status "fail" "failed to write new config"
 		return 1
 	fi
 	chmod 0644 "$CONFFILE"
@@ -92,6 +121,8 @@ subscribe_once() {
 	log "subscription updated, reloading service"
 	/etc/init.d/simple-sing-box reload >/dev/null 2>&1 || \
 		log "service reload returned non-zero"
+
+	write_status "ok" "subscription updated"
 	return 0
 }
 

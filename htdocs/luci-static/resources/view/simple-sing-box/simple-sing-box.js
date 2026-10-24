@@ -64,9 +64,8 @@ return view.extend({
 		const statusInfo = data[1] || { running: false, pid: null };
 
 		// Build the config form bound to the simple-sing-box.main section.
-		// Saving and applying is handled automatically by the framework for
-		// form.Map views, so we do not define handleSaveApply/handleSave/
-		// handleReset here.
+		// Saving is handled by the framework; see the save handlers below,
+		// which restart the service only when that is actually needed.
 		const m = new form.Map('simple-sing-box',
 			_('Simple Sing-Box'),
 			_('Background daemon and subscription auto-update for sing-box.'));
@@ -147,58 +146,103 @@ return view.extend({
 			versionEl.querySelector('span').textContent = versionInfo.version;
 		}
 
-		// Render the run-status text (Running (PID x) / Not running) into the
-		// banner span. The subscription-loop state is intentionally not shown
-		// here: it is implied by the auto-upgrade toggle below.
+		// The last subscription-update result we have seen; used to detect when a
+		// background update started from this page has finished.
+		let lastUpdateTime = (statusInfo.last_update && statusInfo.last_update.time) || 0;
+		// Non-null while we are waiting for a background update to report back.
+		let watchingUpdate = null;
+
+		// Render the run-status text (Running (PID x) / Not running) into the banner
+		// span. The subscription-loop state is intentionally not shown here: it is
+		// implied by the auto-upgrade toggle below.
 		function renderRunStatus(info) {
 			if (!info) info = { running: false, pid: null };
-			let text;
-			if (info.running) {
-				text = _('Running (PID %d)').format(info.pid);
-			} else {
-				text = _('Not running');
-			}
-			runStatusEl.textContent = text;
+			runStatusEl.textContent = info.running
+				? _('Running (PID %d)').format(info.pid)
+				: _('Not running');
 			// Recolor the banner based on daemon run state.
-			if (info.running) {
-				versionEl.classList.remove('warning');
-				versionEl.classList.add('success');
-			} else {
-				versionEl.classList.remove('success');
-				versionEl.classList.add('warning');
-			}
+			versionEl.classList.toggle('warning', !info.running);
+			versionEl.classList.toggle('success', !!info.running);
 		}
 		renderRunStatus(statusInfo);
 
-		// Poll the run state periodically so the banner reflects reality.
+		// Stop watching for a background update and report its outcome.
+		function stopWatching(update) {
+			if (update) {
+				if (update.ok) {
+					ui.addNotification(null,
+						E('p', _('Subscription updated successfully.')), 'success');
+				} else {
+					ui.addNotification(null,
+						E('p', _('Update failed: %s')
+							.format(update.message || _('unknown error'))), 'danger');
+				}
+			}
+			if (watchingUpdate) {
+				updateBtn.textContent = watchingUpdate.label;
+				// Resolve the button handler's promise; LuCI re-enables the
+				// button when it settles.
+				watchingUpdate.resolve();
+				watchingUpdate = null;
+			}
+		}
+
+		// Poll the run state so the banner reflects reality, and pick up the result
+		// of a background update started from this page.
 		this.pollFn = L.bind(function () {
 			return L.resolveDefault(callStatus(), null).then(function (info) {
-				if (info) renderRunStatus(info);
+				if (!info) return;
+				renderRunStatus(info);
+				const t = (info.last_update && info.last_update.time) || 0;
+				if (watchingUpdate) {
+					if (t && t !== watchingUpdate.baseline) {
+						stopWatching(info.last_update);
+					} else if (Date.now() > watchingUpdate.deadline) {
+						ui.addNotification(null,
+							E('p', _('The update is still running in the background; check the log for the result.')),
+							'info');
+						stopWatching(null);
+					}
+				}
+				if (t) lastUpdateTime = t;
 			});
 		}, this);
 		poll.add(this.pollFn, 5);
 		poll.start();
 
-		// One-shot subscription update button. Runs the updater immediately
-		// via the ubus backend and reports the result as a notification.
+		// One-shot subscription update button. The download may take up to 60s,
+		// which is longer than a synchronous ubus call may block for (uhttpd closes
+		// the connection at ~30s), so this only *starts* the update in the
+		// background; the poller above reports the result.
 		const updateBtn = E('button', {
 			class: 'btn cbi-button cbi-button-action important',
 			click: ui.createHandlerFn(this, function () {
-				updateBtn.disabled = true;
-				const original = updateBtn.textContent;
+				// Ignore extra clicks while an update is in flight.
+				if (watchingUpdate)
+					return;
+				const label = updateBtn.textContent;
 				updateBtn.textContent = _('Updating...');
-				L.resolveDefault(callSubscribeOnce(), { success: false, message: _('no response') })
+				return L.resolveDefault(callSubscribeOnce(), { started: false, message: _('no response') })
 					.then(function (res) {
-						updateBtn.disabled = false;
-						updateBtn.textContent = original;
-						if (res && res.success) {
+						if (!res || !res.started) {
+							updateBtn.textContent = label;
 							ui.addNotification(null,
-								E('p', _('Subscription updated successfully.')), 'success');
-						} else {
-							const msg = (res && res.message) ? res.message : _('unknown error');
-							ui.addNotification(null,
-								E('p', _('Update failed: %s').format(msg)), 'danger');
+								E('p', _('Could not start the update: %s')
+									.format((res && res.message) || _('no response'))), 'danger');
+							return;
 						}
+						ui.addNotification(null,
+							E('p', _('Subscription update started.')), 'info');
+						// Keep the returned promise pending until the background update
+						// reports back, so LuCI keeps the button disabled meanwhile.
+						return new Promise(function (resolve) {
+							watchingUpdate = {
+								baseline: lastUpdateTime,
+								deadline: Date.now() + 150000,
+								label: label,
+								resolve: resolve,
+							};
+						});
 					});
 			}),
 		}, _('Update subscription now'));
@@ -231,6 +275,9 @@ return view.extend({
 		return this.handleSave(ev).then(L.bind(function () {
 			return ui.changes.apply(mode == '0');
 		}, this)).then(function () {
+			// Ask the init script to reload; it restarts the service only when
+			// a setting the instances depend on actually changed, so e.g. an
+			// URL-only edit does not drop the running connections.
 			return L.resolveDefault(callReload(),
 				{ success: false, message: _('no response') });
 		});
