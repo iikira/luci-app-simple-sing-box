@@ -1,0 +1,5 @@
+{
+	"config": "simple-sing-box",
+	"init": "simple-sing-box",
+	"affects": [ "simple-sing-box" ]
+}

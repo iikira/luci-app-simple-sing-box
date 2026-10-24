@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# Copyright (C) 2026 iikira <iikira@users.noreply.github.com>
+# SPDX-License-Identifier: MIT License
+#
+# One-time setup: install the default UCI config if missing and enable the
+# init script. Runs once on package install.
+
+[ -f /etc/config/simple-sing-box ] || {
+	cat > /etc/config/simple-sing-box <<'EOF'
+config simple-sing-box 'main'
+	option enabled '0'
+	option subscribe_url ''
+	option subscribe_auto_upgrade '0'
+	option subscribe_upgrade_interval_second '0'
+	option verify '1'
+	option log_stderr '1'
+EOF
+}
+
+# Make the init script executable (tar may not preserve the mode on every
+# install path) and register it for boot.
+chmod 0755 /etc/init.d/simple-sing-box 2>/dev/null
+/etc/init.d/simple-sing-box enable 2>/dev/null
+
+exit 0

@@ -1,0 +1,11 @@
+# editor / OS noise
+.DS_Store
+*.swp
+*~
+
+# build artifacts
+*.ipk
+*.apk
+/build/
+
+CLAUDE.md

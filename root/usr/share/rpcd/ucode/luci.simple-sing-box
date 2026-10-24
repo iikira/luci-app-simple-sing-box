@@ -1,0 +1,134 @@
+/* luci.simple-sing-box.uc — rpcd ubus backend for luci-app-simple-sing-box
+ * Copyright (C) 2026 iikira <iikira@users.noreply.github.com>
+ * SPDX-License-Identifier: MIT License
+ *
+ * Exposes ubus object: luci.simple-sing-box
+ * Methods:
+ *   - version         returns the installed sing-box version string
+ *   - subscribe_once  runs a one-shot subscription pull + check + reload
+ *   - status          reports whether the sing-box daemon (and the optional
+ *                     subscription loop) is running, including pid
+ *   - reload          restart the supervised instances from the current config
+ *
+ * Test:
+ *   ubus -v list luci.simple-sing-box
+ *   ubus -S call luci.simple-sing-box version
+ *   ubus -S call luci.simple-sing-box subscribe_once
+ *   ubus -S call luci.simple-sing-box status
+ *   ubus -S call luci.simple-sing-box reload
+ */
+
+"use strict";
+
+import { popen } from "fs";
+
+let PROG = "sing-box";
+let SUBSCRIBE_PROG = "/usr/libexec/simple-sing-box-subscribe";
+
+function trim(s) {
+	// Trim leading/trailing whitespace. Use an explicit character class
+	// (space, tab, CR, LF) rather than `\s` inside a class, since some
+	// regex engines treat `\s` as a literal 's' inside `[...]`.
+	return replace(s ?? "", /^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+}
+
+function shellquote(s) {
+	return `'${replace(s ?? "", "'", "'\\''")}'`;
+}
+
+/* Run a shell command and return its combined stdout (trimmed). */
+function command(cmd) {
+	return trim(popen(cmd)?.read?.("all"));
+}
+
+/* Return true if the given program is on PATH. */
+function has_cmd(name) {
+	return command("command -v " + name + " >/dev/null 2>&1; echo $?") == "0";
+}
+
+/* version(): { version: "..." } or { version: "", error: "sing-box not installed" } */
+function version() {
+	if (!has_cmd(PROG)) {
+		return { version: "", error: "sing-box not installed" };
+	}
+	let out = command(PROG + " version 2>/dev/null");
+	// First non-empty line is typically "sing-box version 1.14.3".
+	let first = "";
+	let lines = split(out, "\n");
+	for (let i = 0; i < length(lines); i++) {
+		let l = trim(lines[i]);
+		if (l != "") { first = l; break; }
+	}
+	return { version: first };
+}
+
+/* subscribe_once(): { success: bool, message: str } */
+function subscribe_once() {
+	if (!has_cmd(PROG)) {
+		return { success: false, message: "sing-box not installed" };
+	}
+	let rc = command(shellquote(SUBSCRIBE_PROG) + " --once >/dev/null 2>&1; echo $?");
+	if (rc == "0") {
+		return { success: true, message: "subscription updated" };
+	}
+	return { success: false, message: "subscription update failed, see logread" };
+}
+
+/* Query procd for the simple-sing-box service instances. Returns the parsed
+ * service.list result (the {<svc>:{instances:{...}}} object) or null.
+ * `service list` takes a JSON filter argument naming the service. */
+function service_instances() {
+	let raw = command("ubus -S call service list " + shellquote("{\"name\":\"simple-sing-box\"}"));
+	if (!raw) return null;
+	try {
+		return json(raw);
+	} catch (e) {
+		return null;
+	}
+}
+
+/* status(): reports the run state of the sing-box daemon and (if present) the
+ * subscription loop, including pid and whether procd is supervising them. */
+function status() {
+	let result = {
+		running: false,
+		pid: null,
+		// The optional subscription auto-updater instance.
+		subscribe_loop: { running: false, pid: null },
+	};
+	let svc = service_instances();
+	if (svc && svc["simple-sing-box"] && svc["simple-sing-box"].instances) {
+		let inst = svc["simple-sing-box"].instances["sing-box"];
+		if (inst && inst.running) {
+			result.running = true;
+			result.pid = inst.pid ?? null;
+		}
+		let sub = svc["simple-sing-box"].instances["sing-box-subscribe"];
+		if (sub && sub.running) {
+			result.subscribe_loop.running = true;
+			result.subscribe_loop.pid = sub.pid ?? null;
+		}
+	}
+	return result;
+}
+
+/* reload(): restart the supervised instances based on the current UCI config
+ * (stop+start), so toggling enabled/interval from the UI actually starts/stops
+ * the daemon. Runs as root from rpcd, so no `file.exec` ACL is needed on the
+ * frontend. Returns { success, message }. */
+function reload() {
+	let rc = command("/etc/init.d/simple-sing-box reload >/dev/null 2>&1; echo $?");
+	if (rc == "0") {
+		return { success: true, message: "service reloaded" };
+	}
+	return { success: false, message: "service reload failed, see logread" };
+}
+
+const methods = {
+	version:        { call: version },
+	subscribe_once: { call: subscribe_once },
+	status:         { call: status },
+	reload:         { call: reload },
+};
+
+return { "luci.simple-sing-box": methods };

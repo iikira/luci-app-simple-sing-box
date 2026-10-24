@@ -1,0 +1,14 @@
+{
+	"admin/services/simple-sing-box": {
+		"title": "Simple Sing-Box",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "simple-sing-box/simple-sing-box"
+		},
+		"depends": {
+			"acl": [ "simple-sing-box" ],
+			"uci": { "simple-sing-box": true }
+		}
+	}
+}

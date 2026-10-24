@@ -1,0 +1,76 @@
+#!/bin/sh /etc/rc.common
+
+# Copyright (C) 2026 iikira <iikira@users.noreply.github.com>
+# SPDX-License-Identifier: MIT License
+#
+# procd init script for the simple-sing-box background daemon.
+# Runs `sing-box run` in the foreground under procd supervision and
+# optionally starts a second supervised instance that periodically pulls
+# the subscription and reloads the config.
+
+USE_PROCD=1
+START=99
+
+PROG="sing-box"
+SUBSCRIBE_PROG="/usr/libexec/simple-sing-box-subscribe"
+# The config file and working directory are fixed by this package and are not
+# user-configurable via UCI.
+CONFIG_FILE="/etc/simple-sing-box/config.json"
+WORKING_DIRECTORY="/usr/share/simple-sing-box"
+
+start_service() {
+	config_load "simple-sing-box"
+
+	local enabled
+	local log_stderr
+	local subscribe_auto_upgrade interval
+	config_get_bool enabled "main" "enabled" "0"
+	# When disabled, declare no instance. Any previously supervised instance
+	# is torn down by `stop` in reload_service() below.
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get_bool log_stderr "main" "log_stderr" "1"
+
+	# Ensure runtime directories exist so sing-box has a place to write.
+	mkdir -p "$(dirname "$CONFIG_FILE")"
+	mkdir -p "$WORKING_DIRECTORY"
+
+	procd_open_instance "sing-box"
+	procd_set_param command "$PROG" run -c "$CONFIG_FILE" -D "$WORKING_DIRECTORY"
+	procd_set_param file "$CONFIG_FILE"
+	procd_set_param stderr "$log_stderr"
+	procd_set_param limits core="unlimited"
+	procd_set_param limits nofile="1000000 1000000"
+	procd_set_param respawn
+	procd_close_instance
+
+	# Optional subscription auto-update loop.
+	config_get_bool subscribe_auto_upgrade "main" "subscribe_auto_upgrade" "0"
+	config_get interval "main" "subscribe_upgrade_interval_second" "0"
+
+	if [ "$subscribe_auto_upgrade" -eq 1 ] && [ "$interval" -gt 0 ] 2>/dev/null; then
+		procd_open_instance "sing-box-subscribe"
+		procd_set_param command "$SUBSCRIBE_PROG" loop "$interval"
+		procd_set_param respawn
+		procd_set_param stderr "1"
+		procd_close_instance
+	fi
+}
+
+service_triggers() {
+	procd_add_reload_trigger "simple-sing-box"
+}
+
+# A UCI commit triggers a reload. Do a full stop+start so that disabling
+# `enabled` (or changing the auto-upgrade interval) actually stops the
+# previously supervised instances instead of leaving them running. procd's
+# `stop` tears down the supervised processes cleanly — no killall needed.
+reload_service() {
+	stop
+	start
+}
+
+# Manual one-shot subscription pull, callable from CLI or LuCI.
+subscribe_once() {
+	"$SUBSCRIBE_PROG" --once
+}

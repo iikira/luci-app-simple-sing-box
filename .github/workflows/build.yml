@@ -1,0 +1,114 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PACKAGE_NAME: luci-app-simple-sing-box
+  # This is a pure-script package (no compiled binaries), so the built apk/ipk
+  # are architecture-independent: apk uses "noarch", ipk uses "all".
+  ARCH_APK: noarch
+  ARCH_IPK: all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        run: |
+          # Prefer a pushed tag (v1.0.0 -> 1.0.0), else date-based snapshot.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="0.$(date -u +%Y%m%d%H%M%S)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version=$v"
+
+      - name: Stage package tree
+        run: |
+          set -e
+          STAGE="${RUNNER_TEMP}/stage"
+          mkdir -p "$STAGE"
+          # Copy the rootfs overlay verbatim (etc/, usr/...).
+          cp -a root/. "$STAGE/"
+          # LuCI static assets live under /www on the target.
+          mkdir -p "$STAGE/www"
+          cp -a htdocs/. "$STAGE/www/"
+          # Ensure standard runtime + executable dirs exist.
+          mkdir -p "$STAGE/etc/simple-sing-box" "$STAGE/usr/share/simple-sing-box"
+          chmod 0755 "$STAGE/etc/init.d/simple-sing-box"
+          chmod 0755 "$STAGE/usr/libexec/simple-sing-box-subscribe"
+          [ -f "$STAGE/etc/uci-defaults/simple-sing-box" ] && chmod 0755 "$STAGE/etc/uci-defaults/simple-sing-box"
+          # Print the tree for log visibility.
+          echo "=== staged tree ==="
+          ( cd "$STAGE" && find . -maxdepth 4 -printf '%m %p\n' | sort )
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Install apk-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apk-tools binutils
+
+      - name: Prepare signing key
+        # When the APK_SIGN_KEY secret is set (private key only), write it to a
+        # file and pass it to the apk build for signing. The build script
+        # derives the matching public key at runtime for verification.
+        # If the secret is empty, the apk is built unsigned.
+        run: |
+          if [ -n "${{ secrets.APK_SIGN_KEY }}" ]; then
+            SIGN_KEY="${{ runner.temp }}/sign.rsa"
+            printf '%s\n' '${{ secrets.APK_SIGN_KEY }}' > "$SIGN_KEY"
+            chmod 0600 "$SIGN_KEY"
+            echo "SIGN_KEY=$SIGN_KEY" >> "$GITHUB_ENV"
+          else
+            echo "SIGN_KEY=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build .apk
+        run: |
+          .github/build_openwrt_apk.sh \
+            "$ARCH_APK" \
+            "${{ steps.ver.outputs.version }}" \
+            "$STAGE" \
+            "${{ runner.temp }}/${PACKAGE_NAME}-${{ steps.ver.outputs.version }}.apk" \
+            "$SIGN_KEY" \
+            "$PACKAGE_NAME"
+
+      - name: Build .ipk
+        run: |
+          .github/build_openwrt_ipk.sh \
+            "$ARCH_IPK" \
+            "${{ steps.ver.outputs.version }}" \
+            "$STAGE" \
+            "${{ runner.temp }}/${PACKAGE_NAME}-${{ steps.ver.outputs.version }}.ipk" \
+            "$PACKAGE_NAME"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${PACKAGE_NAME}-${{ steps.ver.outputs.version }}
+          path: |
+            ${{ runner.temp }}/${PACKAGE_NAME}-*.apk
+            ${{ runner.temp }}/${PACKAGE_NAME}-*.ipk
+          if-no-files-found: error
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Publish as a draft so the release is not visible until manually
+          # reviewed and published.
+          draft: true
+          files: |
+            ${{ runner.temp }}/${PACKAGE_NAME}-*.apk
+            ${{ runner.temp }}/${PACKAGE_NAME}-*.ipk

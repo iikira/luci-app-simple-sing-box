@@ -1,0 +1,14 @@
+{
+	"simple-sing-box": {
+		"description": "Grant access to luci-app-simple-sing-box RPC and UCI config",
+		"read": {
+			"uci": ["simple-sing-box"],
+			"ubus": {
+				"luci.simple-sing-box": ["version", "subscribe_once", "status", "reload"]
+			}
+		},
+		"write": {
+			"uci": ["simple-sing-box"]
+		}
+	}
+}

@@ -1,0 +1,141 @@
+#!/bin/sh
+
+# Copyright (C) 2026 iikira <iikira@users.noreply.github.com>
+# SPDX-License-Identifier: MIT License
+#
+# Subscription updater for simple-sing-box.
+#
+#   simple-sing-box-subscribe --once     download once, validate, reload
+#   simple-sing-box-subscribe loop <N>   repeat every N seconds
+#
+# The current config is never replaced with a broken one: a fresh download
+# is written to a temp file and only `mv`'d over the real config after
+# `sing-box check` succeeds, then procd is told to reload.
+#
+# Note: do NOT use `set -u` here. /lib/functions.sh (pulled in below) and the
+# procd helper libraries reference unset variables like IPKG_INSTROOT that are
+# only defined inside the package install environment, so `-u` would abort.
+
+set -e
+
+PROG="sing-box"
+CONFIG_NAME="simple-sing-box"
+TAG="simple-sing-box-subscribe"
+# The config file path is fixed by this package and is not user-configurable
+# via UCI; sing-box writes/reads it here.
+CONFFILE="/etc/simple-sing-box/config.json"
+
+log() {
+	logger -t "$TAG" -- "$*"
+}
+
+read_config() {
+	config_load "$CONFIG_NAME"
+	config_get subscribe_url "main" "subscribe_url" ""
+	# verify: whether wget validates the TLS certificate (default on).
+	config_get_bool verify "main" "verify" "1"
+}
+
+# Download, validate, and atomically swap the new config in place.
+# Returns 0 on success, non-zero on any failure. On failure the existing
+# config is left untouched and the daemon keeps running.
+subscribe_once() {
+	read_config
+
+	if [ -z "$subscribe_url" ]; then
+		log "subscribe_url is empty, nothing to do"
+		return 0
+	fi
+
+	if ! command -v "$PROG" >/dev/null 2>&1; then
+		log "sing-box not found, cannot validate subscription"
+		return 1
+	fi
+
+	local wget_opts="-q -O"
+	# When verify is off, disable TLS certificate validation for the download.
+	[ "$verify" -eq 1 ] || wget_opts="--no-check-certificate $wget_opts"
+
+	local tmp
+	tmp=$(mktemp 2>/dev/null || mktemp -t simple-sing-box)
+	# Use an EXIT trap so the temp file is always removed when the script
+	# exits, even on error. (BusyBox ash does not support `trap ... RETURN`.)
+	# Always exit the trap with 0 so it does not override the script exit code.
+	cleanup_tmp() { [ -n "$tmp" ] && rm -f "$tmp"; true; }
+	trap cleanup_tmp EXIT
+
+	log "downloading subscription from configured url"
+	if ! wget $wget_opts "$tmp" "$subscribe_url"; then
+		log "subscription download failed"
+		return 1
+	fi
+
+	if [ ! -s "$tmp" ]; then
+		log "subscription download is empty"
+		return 1
+	fi
+
+	if ! "$PROG" check -c "$tmp" >/dev/null 2>&1; then
+		log "sing-box check failed, keeping current config"
+		return 1
+	fi
+
+	# Swap in the validated config, then ask procd to reload. `mv` consumes
+	# $tmp, but the EXIT trap still safely no-ops afterwards.
+	mkdir -p "$(dirname "$CONFFILE")"
+	if ! mv -f "$tmp" "$CONFFILE"; then
+		log "failed to write new config"
+		return 1
+	fi
+	chmod 0644 "$CONFFILE"
+
+	log "subscription updated, reloading service"
+	/etc/init.d/simple-sing-box reload >/dev/null 2>&1 || \
+		log "service reload returned non-zero"
+	return 0
+}
+
+# Loop forever, pulling once per interval. procd respawns us if we exit.
+loop() {
+	local interval="$1"
+	if [ -z "$interval" ] || [ "$interval" -le 0 ] 2>/dev/null; then
+		log "invalid interval, refusing to loop"
+		return 1
+	fi
+
+	log "starting subscription loop, interval=${interval}s"
+	# Run an immediate pull on startup, then sleep between pulls.
+	while :; do
+		subscribe_once || true
+		sleep "$interval"
+	done
+}
+
+usage() {
+	cat <<EOF
+Usage: $0 --once
+       $0 loop <seconds>
+EOF
+}
+
+main() {
+	case "${1:-}" in
+		--once)
+			subscribe_once
+			;;
+		loop)
+			loop "${2:-}"
+			;;
+		""|-h|--help)
+			usage
+			;;
+		*)
+			usage >&2
+			return 2
+			;;
+	esac
+}
+
+. /lib/functions.sh
+
+main "$@"
