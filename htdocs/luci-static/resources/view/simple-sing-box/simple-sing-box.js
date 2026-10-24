@@ -38,6 +38,13 @@ const callReload = rpc.declare({
 	expect: {},
 });
 
+const callRestart = rpc.declare({
+	object: 'luci.simple-sing-box',
+	method: 'restart',
+	params: [],
+	expect: {},
+});
+
 // Interval presets shown in the UI. The stored value is always seconds.
 const INTERVAL_PRESETS = [
 	['0',      _('Disabled')],
@@ -121,12 +128,44 @@ return view.extend({
 		const conffile = '/etc/simple-sing-box/config.json';
 		const workdir = '/usr/share/simple-sing-box';
 		const runStatusEl = E('span', { id: 'simple-sing-box-runstatus' });
+
+		// Force a full service restart (stop+start, ignoring the settings
+		// fingerprint). It lives here, inline in the status banner next to the
+		// daemon run state, because that is where a restart action belongs and
+		// where it is visible without scrolling to the bottom of the page.
+		// This is a synchronous ubus call — procd's stop+start is fast (a few
+		// seconds at most), well under the ~30s uhttpd ceiling, so unlike the
+		// subscription update we can simply wait for the result.
+		// ui.createHandlerFn keeps the button disabled while the returned
+		// promise is pending, so a double-click cannot trigger two restarts.
+		const restartBtn = E('button', {
+			class: 'btn cbi-button cbi-button-neutral',
+			style: 'margin-left:.5em',
+			click: ui.createHandlerFn(this, function () {
+				const label = restartBtn.textContent;
+				restartBtn.textContent = _('Restarting...');
+				return L.resolveDefault(callRestart(), { success: false, message: _('no response') })
+					.then(function (res) {
+						restartBtn.textContent = label;
+						if (res && res.success) {
+							ui.addNotification(null,
+								E('p', _('Service restarted.')), 'success');
+						} else {
+							ui.addNotification(null,
+								E('p', _('Restart failed: %s')
+									.format((res && res.message) || _('no response'))), 'danger');
+						}
+					});
+			}),
+		}, _('Restart service'));
+
 		const versionEl = E('div', { class: 'alert-message success' }, [
 			E('strong', {}, _('sing-box version: ')),
 			E('span', {}, _('(unknown)')),
 			E('br'),
 			E('strong', {}, _('Daemon: ')),
 			runStatusEl,
+			restartBtn,
 			E('br'),
 			E('strong', {}, _('Config file: ')),
 			E('span', {}, conffile),

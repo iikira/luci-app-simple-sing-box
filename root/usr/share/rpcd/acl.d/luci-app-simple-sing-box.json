@@ -4,7 +4,7 @@
 		"read": {
 			"uci": ["simple-sing-box"],
 			"ubus": {
-				"luci.simple-sing-box": ["version", "subscribe_once", "status", "reload"]
+				"luci.simple-sing-box": ["version", "subscribe_once", "status", "reload", "restart"]
 			}
 		},
 		"write": {

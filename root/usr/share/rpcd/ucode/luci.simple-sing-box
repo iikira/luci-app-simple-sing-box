@@ -10,6 +10,7 @@
  *                     subscription loop) is running, including pid, plus the
  *                     result of the last subscription update
  *   - reload          restart the supervised instances from the current config
+ *   - restart         force a full stop+start, ignoring the settings fingerprint
  *
  * Test:
  *   ubus -v list luci.simple-sing-box
@@ -17,6 +18,7 @@
  *   ubus -S call luci.simple-sing-box subscribe_once
  *   ubus -S call luci.simple-sing-box status
  *   ubus -S call luci.simple-sing-box reload
+ *   ubus -S call luci.simple-sing-box restart
  */
 
 "use strict";
@@ -151,11 +153,24 @@ function reload() {
 	return { success: false, message: "service reload failed, see logread" };
 }
 
+/* restart(): force a full stop+start of the supervised instances, regardless of
+ * the settings fingerprint (i.e. even when nothing changed). Use when the user
+ * explicitly wants to bounce the daemon from the UI. Like reload, runs as root
+ * from rpcd so no `file.exec` ACL is needed. Returns { success, message }. */
+function restart() {
+	let rc = command("/etc/init.d/simple-sing-box restart >/dev/null 2>&1; echo $?");
+	if (rc == "0") {
+		return { success: true, message: "service restarted" };
+	}
+	return { success: false, message: "service restart failed, see logread" };
+}
+
 const methods = {
 	version:        { call: version },
 	subscribe_once: { call: subscribe_once },
 	status:         { call: status },
 	reload:         { call: reload },
+	restart:        { call: restart },
 };
 
 return { "luci.simple-sing-box": methods };
